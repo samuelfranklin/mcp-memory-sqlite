@@ -45,10 +45,16 @@ export function createMemoryServer(
   defaultProjectId?: string,
   embedFn: (text: string) => Promise<Float32Array> = defaultEmbed
 ): McpServer {
-  function projectId(explicit?: string): string {
+  function projectId(explicit?: string, cwd?: string): string {
     const id = explicit ?? defaultProjectId;
-    if (!id) throw new Error('project_id is required (or set MEMORY_PROJECT_ID env var)');
-    return id;
+    if (id) return id;
+    if (cwd) {
+      const project = db.findProjectByPath(cwd);
+      if (project) return project.id;
+    }
+    throw new Error(
+      'project_id could not be resolved. Pass project_id, set MEMORY_PROJECT_ID env var, or pass cwd for auto-detection.'
+    );
   }
 
   const server = new McpServer({ name: 'memory-mcp', version: '0.1.0' });
@@ -69,6 +75,28 @@ export function createMemoryServer(
     (args) => {
       try {
         const project = db.createProject(args);
+        return text(JSON.stringify(project, null, 2));
+      } catch (err) {
+        return errorResult(err);
+      }
+    }
+  );
+
+  // ── PROJECT: detect ──────────────────────────────────────────────────────────
+
+  server.registerTool(
+    'project_detect',
+    {
+      description:
+        'Detects which registered project matches a given working directory path. ' +
+        'Returns the most specific project whose root_path is an ancestor of (or equal to) cwd.',
+      inputSchema: {
+        cwd: z.string().describe('Absolute path of the current working directory'),
+      },
+    },
+    (args) => {
+      try {
+        const project = db.findProjectByPath(args.cwd);
         return text(JSON.stringify(project, null, 2));
       } catch (err) {
         return errorResult(err);
@@ -103,6 +131,7 @@ export function createMemoryServer(
         content:    z.string().describe('Full content of the memory (Markdown supported)'),
         category:   z.enum(['pattern', 'decision', 'bug', 'context', 'trick']).describe('Memory category'),
         project_id: z.string().optional().describe('Project ID (defaults to MEMORY_PROJECT_ID env var)'),
+        cwd:        z.string().optional().describe('Working directory for automatic project detection'),
         summary:    z.string().optional().describe('Short 1-2 line summary'),
         workspace:  z.string().optional().describe('Sub-workspace within the project (e.g. "ms-orders")'),
         tags:       z.array(z.string()).optional().describe('Tags for filtering'),
@@ -110,7 +139,7 @@ export function createMemoryServer(
     },
     async (args) => {
       try {
-        const pid = projectId(args.project_id);
+        const pid = projectId(args.project_id, args.cwd);
         const embedding = await embedFn(args.content);
         const memory = db.createMemory(
           {
@@ -140,11 +169,12 @@ export function createMemoryServer(
       inputSchema: {
         key:        z.string().describe('Memory key'),
         project_id: z.string().optional(),
+        cwd:        z.string().optional().describe('Working directory for automatic project detection'),
       },
     },
     (args) => {
       try {
-        const m = db.getMemory(args.key, projectId(args.project_id));
+        const m = db.getMemory(args.key, projectId(args.project_id, args.cwd));
         if (!m) return text('null');
         return text(JSON.stringify(memoryToJson(m), null, 2));
       } catch (err) {
@@ -161,6 +191,7 @@ export function createMemoryServer(
       description: 'Lists memories, optionally filtered by category, workspace, or status.',
       inputSchema: {
         project_id: z.string().optional(),
+        cwd:        z.string().optional().describe('Working directory for automatic project detection'),
         category:   z.enum(['pattern', 'decision', 'bug', 'context', 'trick']).optional(),
         workspace:  z.string().optional(),
         status:     z.enum(['active', 'deprecated', 'archived']).optional(),
@@ -170,7 +201,7 @@ export function createMemoryServer(
     },
     (args) => {
       try {
-        const pid = projectId(args.project_id);
+        const pid = projectId(args.project_id, args.cwd);
         const memories = db.listMemoriesByProject(pid, {
           category:  args.category as MemoryCategory | undefined,
           workspace: args.workspace,
@@ -196,6 +227,7 @@ export function createMemoryServer(
       inputSchema: {
         query:      z.string().describe('Natural language search query'),
         project_id: z.string().optional(),
+        cwd:        z.string().optional().describe('Working directory for automatic project detection'),
         category:   z.enum(['pattern', 'decision', 'bug', 'context', 'trick']).optional(),
         workspace:  z.string().optional(),
         status:     z.enum(['active', 'deprecated', 'archived']).optional(),
@@ -206,7 +238,7 @@ export function createMemoryServer(
       try {
         const embedding = await embedFn(args.query);
         const results = db.searchSemantic(embedding, {
-          projectId:  args.project_id ?? defaultProjectId,
+          projectId:  args.project_id ?? defaultProjectId ?? (args.cwd ? db.findProjectByPath(args.cwd)?.id : undefined),
           category:   args.category as MemoryCategory | undefined,
           workspace:  args.workspace,
           status:     args.status as MemoryStatus | undefined,
@@ -238,6 +270,7 @@ export function createMemoryServer(
       inputSchema: {
         key:        z.string(),
         project_id: z.string().optional(),
+        cwd:        z.string().optional().describe('Working directory for automatic project detection'),
         content:    z.string().optional(),
         summary:    z.string().optional(),
         status:     z.enum(['active', 'deprecated', 'archived']).optional(),
@@ -246,7 +279,7 @@ export function createMemoryServer(
     },
     async (args) => {
       try {
-        const pid = projectId(args.project_id);
+        const pid = projectId(args.project_id, args.cwd);
         const newEmbedding = args.content ? await embedFn(args.content) : undefined;
         const updated = db.updateMemory(
           args.key,
@@ -274,7 +307,17 @@ export function createMemoryServer(
 
 async function main() {
   const db = new MemoryDatabase(process.env.MEMORY_DB_PATH);
-  const server = createMemoryServer(db, process.env.MEMORY_PROJECT_ID);
+
+  let defaultProjectId = process.env.MEMORY_PROJECT_ID;
+  if (!defaultProjectId) {
+    const detected = db.findProjectByPath(process.cwd());
+    if (detected) {
+      defaultProjectId = detected.id;
+      process.stderr.write(`Auto-detected project: "${detected.id}" (${detected.name}) from ${process.cwd()}\n`);
+    }
+  }
+
+  const server = createMemoryServer(db, defaultProjectId);
   const transport = new StdioServerTransport();
   await server.connect(transport);
   process.stderr.write('MCP Memory Server ready\n');

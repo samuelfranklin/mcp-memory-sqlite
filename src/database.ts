@@ -110,6 +110,25 @@ export class MemoryDatabase {
     );
   }
 
+  /**
+   * Finds the most specific project whose root_path matches or is an ancestor of `cwd`.
+   * Projects are checked by descending path length, so the deepest match wins.
+   * Returns null when no project matches.
+   */
+  findProjectByPath(cwd: string): Project | null {
+    const normalized = cwd.replace(/\/+$/, '');
+    const rows = this.db
+      .prepare('SELECT * FROM projects ORDER BY length(root_path) DESC')
+      .all() as any[];
+    for (const row of rows) {
+      const rootPath = (row.root_path as string).replace(/\/+$/, '');
+      if (normalized === rootPath || normalized.startsWith(rootPath + '/')) {
+        return this.rowToProject(row);
+      }
+    }
+    return null;
+  }
+
   // --- MEMORY operations ---
 
   createMemory(input: MemoryCreateInput, embedding: Float32Array): Memory {

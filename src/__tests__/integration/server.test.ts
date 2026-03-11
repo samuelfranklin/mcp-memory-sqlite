@@ -74,6 +74,80 @@ describe('MCP Server — project tools', () => {
     expect(result.id).toBe(newId);
     expect(result.name).toBe('New Project');
   });
+
+  it('project_detect should return project matching the given cwd', async () => {
+    const detected = await callTool<{ id: string; name: string }>('project_detect', {
+      cwd: '/test/src',
+    });
+    expect(detected).not.toBeNull();
+    expect(detected.id).toBe(PROJECT_ID);
+  });
+
+  it('project_detect should return null for an unmatched path', async () => {
+    const raw = await client.callTool({
+      name: 'project_detect',
+      arguments: { cwd: '/completely/different/path' },
+    });
+    const txt = (raw.content as Array<{ text: string }>)[0].text;
+    expect(JSON.parse(txt)).toBeNull();
+  });
+
+  it('project_detect should return most specific match for nested dirs', async () => {
+    const nestedId = 'nested-proj-' + randomUUID();
+    db.createProject({ id: nestedId, name: 'Nested', root_path: '/test/subapp' });
+
+    const detected = await callTool<{ id: string }>('project_detect', {
+      cwd: '/test/subapp/src/components',
+    });
+    expect(detected.id).toBe(nestedId);
+  });
+});
+
+describe('MCP Server — cwd-based project resolution', () => {
+  it('memory_save should resolve project via cwd', async () => {
+    await callTool('memory_save', {
+      key:      'cwd:test:001',
+      content:  'Resolved via cwd',
+      category: 'pattern',
+      cwd:      '/test',
+    });
+
+    const retrieved = await callTool<{ key: string; content: string }>('memory_get', {
+      key: 'cwd:test:001',
+      cwd: '/test/any/subdir',
+    });
+    expect(retrieved.key).toBe('cwd:test:001');
+    expect(retrieved.content).toBe('Resolved via cwd');
+  });
+
+  it('memory_list should resolve project via cwd', async () => {
+    await callTool('memory_save', {
+      key:      'cwd:list:001',
+      content:  'List via cwd',
+      category: 'context',
+      cwd:      '/test',
+    });
+
+    const list = await callTool<Array<{ key: string }>>('memory_list', { cwd: '/test' });
+    expect(list.some((m) => m.key === 'cwd:list:001')).toBe(true);
+  });
+
+  it('memory tools should throw when cwd does not match any project', async () => {
+    // Must use a server without a defaultProjectId so cwd is the only resolution path
+    const serverNoDefault = createMemoryServer(db, undefined, stubEmbed);
+    const [st, ct] = InMemoryTransport.createLinkedPair();
+    await serverNoDefault.connect(st);
+    const noDefaultClient = new Client({ name: 'no-default-client', version: '0.0.1' });
+    await noDefaultClient.connect(ct);
+
+    const raw = await noDefaultClient.callTool({
+      name: 'memory_list',
+      arguments: { cwd: '/no/match/here' },
+    });
+    expect(raw.isError).toBe(true);
+
+    await noDefaultClient.close();
+  });
 });
 
 describe('MCP Server — memory_save + memory_get', () => {

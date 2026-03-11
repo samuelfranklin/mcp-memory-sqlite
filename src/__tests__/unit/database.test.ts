@@ -79,6 +79,48 @@ describe('MemoryDatabase - CRUD Operations', () => {
       expect(projects.some((p) => p.id === proj1Id)).toBe(true);
       expect(projects.some((p) => p.id === proj2Id)).toBe(true);
     });
+
+    it('should find project by exact root_path', () => {
+      const id = 'proj-exact-' + randomUUID();
+      db.createProject({ id, name: 'Exact Match', root_path: '/home/user/myapp' });
+
+      const found = db.findProjectByPath('/home/user/myapp');
+      expect(found).not.toBeNull();
+      expect(found!.id).toBe(id);
+    });
+
+    it('should find project when cwd is a subdirectory of root_path', () => {
+      const id = 'proj-sub-' + randomUUID();
+      db.createProject({ id, name: 'Sub Match', root_path: '/home/user/myapp' });
+
+      const found = db.findProjectByPath('/home/user/myapp/src/components');
+      expect(found).not.toBeNull();
+      expect(found!.id).toBe(id);
+    });
+
+    it('should return the most specific match when paths overlap', () => {
+      const parentId = 'proj-parent-' + randomUUID();
+      const childId  = 'proj-child-' + randomUUID();
+      db.createProject({ id: parentId, name: 'Parent', root_path: '/workspace' });
+      db.createProject({ id: childId,  name: 'Child',  root_path: '/workspace/frontend' });
+
+      const found = db.findProjectByPath('/workspace/frontend/src');
+      expect(found!.id).toBe(childId);
+    });
+
+    it('should return null when no project matches cwd', () => {
+      const found = db.findProjectByPath('/completely/unrelated/path');
+      expect(found).toBeNull();
+    });
+
+    it('should handle trailing slashes in root_path gracefully', () => {
+      const id = 'proj-trailing-' + randomUUID();
+      db.createProject({ id, name: 'Trailing Slash', root_path: '/home/user/app/' });
+
+      const found = db.findProjectByPath('/home/user/app/lib');
+      expect(found).not.toBeNull();
+      expect(found!.id).toBe(id);
+    });
   });
 
   describe('MEMORY operations', () => {
